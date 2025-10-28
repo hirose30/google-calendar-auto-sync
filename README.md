@@ -16,7 +16,7 @@ When calendar events are created or updated in a primary Google Workspace (e.g.,
 
 ## Quick Start
 
-**日本語**: [クイックスタートガイド（日本語）](QUICKSTART_JA.md) で5分でセットアップ！
+**Japanese users**: See [Japanese Quick Start Guide (QUICKSTART_JA.md)](QUICKSTART_JA.md) for 5-minute setup!
 
 For detailed setup instructions, see [TESTING.md](TESTING.md) or [quickstart.md](specs/001-calendar-cross-workspace-sync/quickstart.md)
 
@@ -143,20 +143,20 @@ Share the Spreadsheet with your service account email (Viewer permission).
 
 ## Success Criteria
 
-本システムは以下の成功基準（Success Criteria）を満たすように設計されています：
+This system is designed to meet the following success criteria:
 
-| ID | 基準 | 目標値 | 測定方法 |
-|----|------|--------|----------|
-| **SC-001** | イベント作成時の同期レイテンシ | 95%のケースで2分以内 | Cloud Logging クエリで p95 測定 |
-| **SC-002** | イベント更新時の同期レイテンシ | 95%のケースで2分以内 | Cloud Logging クエリで p95 測定 |
-| **SC-003** | イベント検知率 | 99.9%以上 | Watch Channel登録状態を監視 |
-| **SC-004** | 重複処理の防止 | 0件 | DeduplicationCache ログを確認 |
-| **SC-005** | 並行処理性能 | 100件の同時イベント変更を処理 | 負荷テスト（オプション） |
-| **SC-006** | 管理工数削減 | 90%削減（手動管理比） | 主観的評価 |
-| **SC-007** | ユーザ満足度 | 85%以上 | ユーザアンケート（本番運用後） |
-| **SC-008** | トラブルシューティング時間 | 10分以内で原因特定 | ログの充実度で担保 |
+| ID | Criteria | Target | Measurement Method |
+|----|----------|--------|-------------------|
+| **SC-001** | Event creation sync latency | Within 2 minutes for 95% of cases | Measure p95 via Cloud Logging queries |
+| **SC-002** | Event update sync latency | Within 2 minutes for 95% of cases | Measure p95 via Cloud Logging queries |
+| **SC-003** | Event detection rate | 99.9% or higher | Monitor Watch Channel registration status |
+| **SC-004** | Duplicate processing prevention | 0 duplicates | Check DeduplicationCache logs |
+| **SC-005** | Concurrent processing performance | Handle 100 simultaneous event changes | Load testing (optional) |
+| **SC-006** | Administrative effort reduction | 90% reduction vs. manual management | Subjective evaluation |
+| **SC-007** | User satisfaction | 85% or higher | User survey (after production deployment) |
+| **SC-008** | Troubleshooting time | Root cause identification within 10 minutes | Ensured by comprehensive logging |
 
-詳細は [DEPLOYMENT.md](DEPLOYMENT.md) のモニタリングセクションを参照してください。
+For details, see the Monitoring section in [DEPLOYMENT.md](DEPLOYMENT.md).
 
 ## Monitoring
 
@@ -195,39 +195,40 @@ Key log fields:
 - `message`: Human-readable message
 - `context`: Contextual data (eventId, calendarId, operation, duration, error)
 
-**重要なログメッセージ:**
-- `Service account key loaded from environment variable` - 起動成功
-- `User mappings loaded from Spreadsheet` - マッピング読み込み成功
-- `Watch channel registered successfully` - Webhook登録成功
-- `Event synced successfully` - 同期成功
+**Important log messages:**
+- `Service account key loaded from environment variable` - Startup successful
+- `User mappings loaded from Spreadsheet` - Mapping loaded successfully
+- `Watch channel registered successfully` - Webhook registration successful
+- `Event synced successfully` - Synchronization successful
 
 ## Deployment
 
-### Google Cloud Run（推奨）
+### Google Cloud Run (Recommended)
 
-**簡単デプロイ：**
+**Easy Deployment:**
 
 ```bash
-# 1. deploy-cloudrun.sh を編集してPROJECT_IDを設定
+# 1. Copy example deployment script and configure PROJECT_ID
+cp deploy-cloudrun.sh.example deploy-cloudrun.sh
 nano deploy-cloudrun.sh
 
-# 2. デプロイ実行
+# 2. Run deployment
 ./deploy-cloudrun.sh
 ```
 
-**メリット：**
-- ✅ 固定HTTPS URL（Webhook URL変更不要）
-- ✅ 無料枠あり（月100万リクエストまで）
-- ✅ 自動SSL証明書
-- ✅ ログ統合
-- ✅ 排他制御（`--max-instances 1` で重複処理を防止）
+**Benefits:**
+- ✅ Fixed HTTPS URL (no need to change Webhook URL)
+- ✅ Free tier available (up to 1M requests/month)
+- ✅ Automatic SSL certificates
+- ✅ Integrated logging
+- ✅ Concurrency control (`--max-instances 1` prevents duplicate processing)
 
-詳細は [DEPLOYMENT.md](DEPLOYMENT.md) を参照
+See [DEPLOYMENT.md](DEPLOYMENT.md) for details.
 
-**スケーリング設定：**
-- `--max-instances 1`（推奨、コスト0円）
-- 1インスタンスで1日1000イベント程度まで対応可能
-- **外部キャッシュ（Redis等）は不要**（メモリ内DeduplicationCacheで十分）
+**Scaling Configuration:**
+- `--max-instances 1` (recommended, zero cost)
+- Single instance can handle ~1000 events/day
+- **No external cache needed** (in-memory DeduplicationCache is sufficient)
 
 ### Docker
 
@@ -297,33 +298,33 @@ npm run format
 
 ## Terminology
 
-プロジェクト内で使用される主要な用語：
+Key terms used throughout this project:
 
-| 用語 | 説明 | 例 |
-|------|------|-----|
-| **Primary Workspace** | 主要な Google Workspace ドメイン | hoge.jp |
-| **Secondary Workspace** | 同期先の Google Workspace ドメイン | fuga.jp, baz.jp |
-| **User Mapping** | プライマリユーザとセカンダリユーザの対応関係 | hirose30@hoge.jp → hirose30@fuga.jp |
-| **Watch Channel** | Google Calendar Push Notification のチャネル | 7日間有効、自動更新 |
-| **Sync Event** | カレンダー同期処理のトリガーとなるイベント | create, update, delete |
-| **Deduplication Cache** | 重複処理を防ぐための一時キャッシュ | 5分間 TTL |
-| **FR** | Functional Requirement（機能要件） | FR-001, FR-002... |
-| **US** | User Story（ユーザーストーリー） | US1, US2... |
-| **SC** | Success Criteria（成功基準） | SC-001, SC-002... |
-| **P1/P2/P3** | Priority（優先度） | P1=最高、P3=最低 |
-| **MVP** | Minimum Viable Product（最小実装） | Phase 1-4（コア同期機能） |
-| **TTL** | Time To Live（有効期限） | キャッシュの保持期間 |
+| Term | Description | Example |
+|------|-------------|---------|
+| **Primary Workspace** | Main Google Workspace domain | hoge.jp |
+| **Secondary Workspace** | Target Google Workspace domain(s) for synchronization | fuga.jp, baz.jp |
+| **User Mapping** | Relationship between primary and secondary user identities | user@hoge.jp → user@fuga.jp |
+| **Watch Channel** | Google Calendar Push Notification channel | Valid for 7 days, auto-renewed |
+| **Sync Event** | Event that triggers calendar synchronization | create, update, delete |
+| **Deduplication Cache** | Temporary cache to prevent duplicate processing | 5-minute TTL |
+| **FR** | Functional Requirement | FR-001, FR-002... |
+| **US** | User Story | US1, US2... |
+| **SC** | Success Criteria | SC-001, SC-002... |
+| **P1/P2/P3** | Priority levels | P1=Highest, P3=Lowest |
+| **MVP** | Minimum Viable Product | Phase 1-4 (core sync functionality) |
+| **TTL** | Time To Live | Cache retention period |
 
-### 略語
+### Abbreviations
 
 - **API**: Application Programming Interface
 - **JWT**: JSON Web Token
 - **OAuth**: Open Authorization
 - **GCR**: Google Container Registry
-- **SA**: Service Account（サービスアカウント）
+- **SA**: Service Account
 - **TTL**: Time To Live
 - **SLA**: Service Level Agreement
-- **p95**: 95th percentile（95パーセンタイル）
+- **p95**: 95th percentile
 
 ## License
 
