@@ -200,6 +200,184 @@ export class CalendarSyncService {
   }
 
   /**
+   * Sync recurring parent event by adding secondary workspace attendees
+   * This updates ALL instances at once (Google Calendar handles propagation)
+   *
+   * @param calendarId Calendar ID (primary user's calendar)
+   * @param baseEventId Base event ID (without instance suffix)
+   * @returns Sync result with added attendees
+   */
+  async syncRecurringParentEvent(
+    calendarId: string,
+    baseEventId: string
+  ): Promise<SyncResult> {
+    const startTime = Date.now();
+
+    try {
+      logger.info('Fetching recurring parent event', {
+        operation: 'syncRecurringParentEvent',
+        baseEventId,
+        calendarId,
+      });
+
+      // Fetch parent event using base ID
+      const parentEvent = await withRetry(() =>
+        this.calendarClient.getEvent(calendarId, baseEventId)
+      );
+
+      // Check if parent has been cancelled
+      if (parentEvent.status === 'cancelled') {
+        const duration = Date.now() - startTime;
+        logger.info('Parent event cancelled, skipping sync', {
+          operation: 'syncRecurringParentEvent',
+          baseEventId,
+          calendarId,
+          duration,
+        });
+
+        return {
+          eventId: baseEventId,
+          calendarId,
+          addedAttendees: [],
+          skipped: true,
+          skipReason: 'Parent event cancelled',
+        };
+      }
+
+      // Get primary workspace attendees
+      const currentAttendees = parentEvent.attendees || [];
+
+      // Find primary workspace attendees with mappings
+      const primaryAttendees = currentAttendees.filter(
+        (attendee) =>
+          attendee.email && this.mappingStore.hasPrimaryUser(attendee.email)
+      );
+
+      // If no primary attendees in guest list, check if calendar owner is a primary user
+      const isCalendarOwnerPrimary = this.mappingStore.hasPrimaryUser(calendarId);
+
+      if (primaryAttendees.length === 0 && !isCalendarOwnerPrimary) {
+        const duration = Date.now() - startTime;
+        logger.debug('No mapped primary attendees found, skipping sync', {
+          operation: 'syncRecurringParentEvent',
+          duration,
+          calendarId,
+          baseEventId,
+          context: {
+            attendeeEmails: currentAttendees.map((a) => a.email),
+            calendarOwner: calendarId,
+          },
+        });
+
+        return {
+          eventId: baseEventId,
+          calendarId,
+          addedAttendees: [],
+          skipped: true,
+          skipReason: 'No mapped primary attendees',
+        };
+      }
+
+      // If calendar owner is primary but not in attendees, add them to primaryAttendees list
+      if (isCalendarOwnerPrimary && primaryAttendees.length === 0) {
+        primaryAttendees.push({ email: calendarId });
+        logger.debug('Calendar owner is primary user, will add secondary accounts', {
+          operation: 'syncRecurringParentEvent',
+          calendarId,
+          baseEventId,
+          context: {
+            calendarOwner: calendarId,
+          },
+        });
+      }
+
+      const primaryEmails = primaryAttendees.map((a) => a.email).filter((e): e is string => !!e);
+
+      // Find secondary workspace mappings
+      const secondariesToAdd = this.resolveSecondariesToAdd(
+        primaryAttendees,
+        currentAttendees // Current = all attendees for deduplication check
+      );
+
+      if (secondariesToAdd.length === 0) {
+        const duration = Date.now() - startTime;
+        logger.debug('No secondary workspace attendees to add', {
+          operation: 'syncRecurringParentEvent',
+          baseEventId,
+          calendarId,
+          duration,
+          context: {
+            primaryEmails,
+          },
+        });
+
+        return {
+          eventId: baseEventId,
+          calendarId,
+          addedAttendees: [],
+          skipped: true,
+          skipReason: 'All secondaries already present',
+        };
+      }
+
+      // Merge attendees (add missing secondary emails)
+      const mergedAttendees = [
+        ...primaryAttendees,
+        ...secondariesToAdd.map((email) => ({
+          email,
+          responseStatus: 'needsAction' as const,
+        })),
+      ];
+
+      // Update parent event with retry
+      await withRetry(() =>
+        this.calendarClient.updateEventAttendees(
+          calendarId,
+          baseEventId,
+          mergedAttendees,
+          'all' // Send email notifications to new attendees
+        )
+      );
+
+      const duration = Date.now() - startTime;
+
+      logger.info('Parent event synced successfully', {
+        operation: 'syncRecurringParentEvent',
+        baseEventId,
+        calendarId,
+        duration,
+        context: {
+          addedAttendees: secondariesToAdd,
+          primaryAttendees: primaryEmails,
+        },
+      });
+
+      return {
+        eventId: baseEventId,
+        calendarId,
+        addedAttendees: secondariesToAdd,
+        skipped: false,
+      };
+    } catch (error) {
+      const duration = Date.now() - startTime;
+      const err = error as Error;
+
+      logger.error('Failed to sync recurring parent event', {
+        operation: 'syncRecurringParentEvent',
+        baseEventId,
+        calendarId,
+        duration,
+        error: {
+          message: err.message,
+          stack: err.stack,
+        },
+      });
+
+      throw error;
+    }
+  }
+
+  /**
    * Resolve which secondary emails need to be added to the event
    * Supports one-to-many mappings (one primary → multiple secondaries)
    * Ensures uniqueness (no duplicate attendees)
