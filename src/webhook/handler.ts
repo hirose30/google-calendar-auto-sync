@@ -7,6 +7,23 @@ import { parseWebhookHeaders, isSyncMessage, isChangeNotification } from './vali
 import { logger } from '../utils/logger.js';
 
 /**
+ * Check if event ID represents a recurring event instance
+ * Format: baseEventId_instanceDateTime (e.g., "abc123_20251115T100000Z")
+ */
+function isRecurringInstance(eventId: string): boolean {
+  return eventId.includes('_');
+}
+
+/**
+ * Extract base event ID from recurring instance ID
+ * Input: "abc123_20251115T100000Z"
+ * Output: "abc123"
+ */
+function extractBaseEventId(instanceId: string): string {
+  return instanceId.split('_')[0];
+}
+
+/**
  * Handle Google Calendar webhook notifications
  */
 export class WebhookHandler {
@@ -182,35 +199,80 @@ export class WebhookHandler {
       for (const event of events) {
         if (!event.id) continue;
 
-        // Check deduplication cache to prevent concurrent processing
-        if (this.dedupCache.isDuplicate(calendarId, event.id)) {
-          logger.debug('Skipping duplicate event sync (already in progress)', {
-            operation: 'processCalendarChanges',
-            context: {
-              calendarId,
-              eventId: event.id,
-            },
-          });
-          continue; // Skip this event
-        }
+        // Detect if this is a recurring event instance
+        if (isRecurringInstance(event.id)) {
+          // Recurring instance → sync parent event instead
+          const baseId = extractBaseEventId(event.id);
 
-        // Mark as processing BEFORE starting sync
-        this.dedupCache.markProcessing(calendarId, event.id);
-
-        try {
-          await this.syncService.syncEvent(calendarId, event.id);
-        } catch (error) {
-          logger.error('Failed to sync event', {
-            operation: 'processCalendarChanges',
-            error: {
-              message: (error as Error).message,
-            },
-            context: {
-              calendarId,
-              eventId: event.id,
-            },
+          logger.info('Recurring instance detected', {
+            operation: 'detectRecurringInstance',
+            instanceId: event.id,
+            baseEventId: baseId,
+            calendarId,
           });
-          // Continue processing other events
+
+          // Check deduplication with base ID (not instance ID)
+          if (this.dedupCache.isDuplicate(calendarId, baseId)) {
+            logger.debug('Parent event already processing, skipping', {
+              operation: 'processCalendarChanges',
+              baseEventId: baseId,
+              instanceId: event.id,
+              calendarId,
+            });
+            continue;
+          }
+
+          // Mark base ID as processing
+          this.dedupCache.markProcessing(calendarId, baseId);
+
+          try {
+            await this.syncService.syncRecurringParentEvent(calendarId, baseId);
+          } catch (error) {
+            logger.error('Failed to sync recurring parent event', {
+              operation: 'processCalendarChanges',
+              error: {
+                message: (error as Error).message,
+              },
+              context: {
+                calendarId,
+                baseEventId: baseId,
+                instanceId: event.id,
+              },
+            });
+            // Continue processing other events
+          }
+        } else {
+          // Single event → existing flow (unchanged)
+          // Check deduplication cache to prevent concurrent processing
+          if (this.dedupCache.isDuplicate(calendarId, event.id)) {
+            logger.debug('Skipping duplicate event sync (already in progress)', {
+              operation: 'processCalendarChanges',
+              context: {
+                calendarId,
+                eventId: event.id,
+              },
+            });
+            continue; // Skip this event
+          }
+
+          // Mark as processing BEFORE starting sync
+          this.dedupCache.markProcessing(calendarId, event.id);
+
+          try {
+            await this.syncService.syncEvent(calendarId, event.id);
+          } catch (error) {
+            logger.error('Failed to sync event', {
+              operation: 'processCalendarChanges',
+              error: {
+                message: (error as Error).message,
+              },
+              context: {
+                calendarId,
+                eventId: event.id,
+              },
+            });
+            // Continue processing other events
+          }
         }
       }
 
