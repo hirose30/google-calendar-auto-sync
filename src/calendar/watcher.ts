@@ -1,6 +1,7 @@
 import { CalendarClient } from './client.js';
 import { ChannelRegistry, WatchChannel } from '../state/channel-registry.js';
 import { UserMappingStore } from '../state/mapping-store.js';
+import { ChannelSync } from '../state/channel-sync.js';
 import { logger } from '../utils/logger.js';
 import { withRetry } from '../utils/retry.js';
 
@@ -11,6 +12,7 @@ export class WatchChannelManager {
   private calendarClient: CalendarClient;
   private channelRegistry: ChannelRegistry;
   private mappingStore: UserMappingStore;
+  private channelSync: ChannelSync | null;
   private webhookUrl: string;
   private renewalThresholdMs: number;
 
@@ -19,11 +21,13 @@ export class WatchChannelManager {
     channelRegistry: ChannelRegistry,
     mappingStore: UserMappingStore,
     webhookUrl: string,
-    renewalThresholdMs: number
+    renewalThresholdMs: number,
+    channelSync: ChannelSync | null = null
   ) {
     this.calendarClient = calendarClient;
     this.channelRegistry = channelRegistry;
     this.mappingStore = mappingStore;
+    this.channelSync = channelSync;
     this.webhookUrl = webhookUrl;
     this.renewalThresholdMs = renewalThresholdMs;
   }
@@ -110,7 +114,29 @@ export class WatchChannelManager {
         expiration: parseInt(response.expiration, 10),
       };
 
-      this.channelRegistry.register(channel);
+      // Save to both Firestore and registry (if ChannelSync available)
+      if (this.channelSync) {
+        try {
+          await this.channelSync.saveToAll(channel);
+        } catch (error) {
+          // Log Firestore save failure but don't fail registration
+          // Channel is still in memory and can be used
+          logger.warn('Failed to save channel to Firestore - channel only in memory', {
+            operation: 'registerChannel',
+            context: {
+              channelId: channel.channelId,
+              calendarId,
+              error: error instanceof Error ? error.message : String(error),
+            },
+          });
+
+          // Fallback: at least save to registry
+          this.channelRegistry.register(channel);
+        }
+      } else {
+        // No ChannelSync available, use registry only (backward compatibility)
+        this.channelRegistry.register(channel);
+      }
 
       const duration = Date.now() - startTime;
 
@@ -122,6 +148,7 @@ export class WatchChannelManager {
           channelId: channel.channelId,
           resourceId: channel.resourceId,
           expiration: new Date(channel.expiration).toISOString(),
+          persisted: this.channelSync !== null,
         },
       });
 

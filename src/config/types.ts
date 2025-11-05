@@ -57,6 +57,7 @@ export interface AppConfig {
   dedupCacheTtlMs: number;
   mappingRefreshIntervalMs: number;
   channelRenewalThresholdMs: number;
+  firestoreEnabled: boolean;
 }
 
 /**
@@ -79,6 +80,7 @@ export function loadAppConfig(): AppConfig {
       process.env.CHANNEL_RENEWAL_THRESHOLD_MS || '86400000',
       10
     ),
+    firestoreEnabled: process.env.FIRESTORE_ENABLED !== 'false', // Enabled by default
   };
 }
 

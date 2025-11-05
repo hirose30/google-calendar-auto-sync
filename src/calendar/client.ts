@@ -145,7 +145,8 @@ export class CalendarClient {
       const response = await calendar.events.list({
         calendarId,
         updatedMin,
-        singleEvents: true,
+        singleEvents: false,
+        orderBy: 'updated',
         maxResults,
       });
 
