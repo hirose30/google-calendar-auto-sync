@@ -184,7 +184,7 @@ export class WebhookHandler {
       const events = await this.syncService['calendarClient'].listRecentEvents(
         calendarId,
         updatedMin,
-        50
+        200
       );
 
       logger.info('Fetched recent events for processing', {

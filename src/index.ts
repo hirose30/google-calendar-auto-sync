@@ -5,6 +5,9 @@ import { loadServiceAccountKey, loadUserMappingsFromSheet } from './config/loade
 import { UserMappingStore } from './state/mapping-store.js';
 import { ChannelRegistry } from './state/channel-registry.js';
 import { DeduplicationCache } from './state/dedup-cache.js';
+import { ChannelStore } from './state/channel-store.js';
+import { ChannelSync } from './state/channel-sync.js';
+import { isFirestoreInitialized } from './state/firestore-client.js';
 import { CalendarClient } from './calendar/client.js';
 import { CalendarSyncService } from './calendar/sync.js';
 import { WatchChannelManager } from './calendar/watcher.js';
@@ -27,6 +30,8 @@ const serviceAccount = loadServiceAccountKey(config.configDir);
 const userMappingStore = new UserMappingStore();
 const channelRegistry = new ChannelRegistry();
 const dedupCache = new DeduplicationCache(config.dedupCacheTtlMs);
+const channelStore = new ChannelStore();
+const channelSync = new ChannelSync(channelRegistry, channelStore);
 
 // Initialize services
 const calendarClient = new CalendarClient(serviceAccount);
@@ -36,7 +41,8 @@ const watchManager = new WatchChannelManager(
   channelRegistry,
   userMappingStore,
   config.webhookUrl,
-  config.channelRenewalThresholdMs
+  config.channelRenewalThresholdMs,
+  channelSync
 );
 const webhookHandler = new WebhookHandler(
   syncService,
@@ -101,6 +107,60 @@ async function refreshUserMappings(): Promise<void> {
     });
 
     // Don't throw - allow app to continue with existing mappings
+  }
+}
+
+/**
+ * Restore watch channels from Firestore
+ * Handles Firestore unavailability gracefully with fallback to full re-registration
+ */
+async function restoreChannelsFromFirestore(): Promise<boolean> {
+  const startTime = Date.now();
+
+  try {
+    logger.info('Restoring watch channels from Firestore', {
+      operation: 'restoreChannelsFromFirestore',
+    });
+
+    const result = await channelSync.loadFromFirestore(true);
+
+    const duration = Date.now() - startTime;
+
+    logger.info('Channels restored from Firestore', {
+      operation: 'restoreChannelsFromFirestore',
+      duration,
+      context: {
+        loaded: result.loaded,
+        expired: result.expired,
+        needsRenewal: result.needsRenewal.length,
+      },
+    });
+
+    if (result.expired > 0) {
+      logger.warn('Expired channels detected - will re-register', {
+        operation: 'restoreChannelsFromFirestore',
+        context: {
+          expiredCount: result.expired,
+          channelIds: result.needsRenewal,
+        },
+      });
+    }
+
+    return true;
+  } catch (error) {
+    const duration = Date.now() - startTime;
+    const err = error as Error;
+
+    logger.warn('Failed to restore channels from Firestore - will fallback to full re-registration', {
+      operation: 'restoreChannelsFromFirestore',
+      duration,
+      error: {
+        message: err.message,
+        stack: err.stack,
+      },
+    });
+
+    return false;
   }
 }
 
@@ -175,6 +235,8 @@ app.post('/webhook', async (req, res) => {
  * 4. Start Express server
  */
 async function start(): Promise<void> {
+  const serviceStartTime = Date.now();
+
   try {
     logger.info('Starting Google Calendar Auto-Sync service', {
       operation: 'start',
@@ -198,8 +260,36 @@ async function start(): Promise<void> {
         }
       );
     } else {
-      // Register watch channels for all primary users
-      await watchManager.registerAllChannels();
+      // Try to restore channels from Firestore (lazy init, non-blocking)
+      const restored = config.firestoreEnabled ? await restoreChannelsFromFirestore() : false;
+
+      if (restored && channelRegistry.size() > 0) {
+        logger.info('Channels restored from Firestore successfully', {
+          operation: 'start',
+          context: {
+            channelCount: channelRegistry.size(),
+          },
+        });
+
+        // Check if any channels were expired and need re-registration
+        const expiringSoon = channelRegistry.getExpiringSoon(86400000); // 24 hours
+        if (expiringSoon.length > 0) {
+          logger.info('Some channels are expiring soon - will be renewed by scheduled job', {
+            operation: 'start',
+            context: {
+              expiringCount: expiringSoon.length,
+              channelIds: expiringSoon.map(ch => ch.channelId),
+            },
+          });
+        }
+      } else {
+        // Fallback: Register watch channels for all primary users
+        logger.info('Registering new watch channels (Firestore not available or empty)', {
+          operation: 'start',
+        });
+
+        await watchManager.registerAllChannels();
+      }
     }
 
     // Set up periodic mapping refresh (every 5 minutes by default)
@@ -248,14 +338,33 @@ async function start(): Promise<void> {
 
     // Start Express server
     app.listen(config.port, () => {
+      const totalStartupTime = Date.now() - serviceStartTime;
+
       logger.info('Express server started', {
         operation: 'start',
+        duration: totalStartupTime,
         context: {
           port: config.port,
           health: `http://localhost:${config.port}/health`,
           webhook: `${config.webhookUrl}`,
+          startupPerformance: {
+            totalMs: totalStartupTime,
+            firestoreInitialized: isFirestoreInitialized(),
+            channelCount: channelRegistry.size(),
+          },
         },
       });
+
+      // Log cold start performance metric
+      if (totalStartupTime > 5000) {
+        logger.warn('Slow cold start detected', {
+          operation: 'start',
+          context: {
+            duration: totalStartupTime,
+            threshold: 5000,
+          },
+        });
+      }
     });
   } catch (error) {
     const err = error as Error;
@@ -276,4 +385,4 @@ async function start(): Promise<void> {
 start();
 
 // Export for testing
-export { app, userMappingStore };
+export { app, userMappingStore, channelRegistry, channelStore, channelSync, watchManager };

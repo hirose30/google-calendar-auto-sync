@@ -98,4 +98,28 @@ export class ChannelRegistry {
   size(): number {
     return this.channels.size;
   }
+
+  /**
+   * Update an existing channel
+   * This is an alias for register() but makes update semantics clearer
+   */
+  update(channel: WatchChannel): void {
+    this.register(channel);
+  }
+
+  /**
+   * Clear all channels from registry
+   * Used during full sync or service reset
+   */
+  clear(): void {
+    const count = this.channels.size;
+    this.channels.clear();
+
+    logger.info('Channel registry cleared', {
+      operation: 'ChannelRegistry.clear',
+      context: {
+        clearedCount: count,
+      },
+    });
+  }
 }
