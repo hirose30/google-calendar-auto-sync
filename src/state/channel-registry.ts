@@ -86,6 +86,14 @@ export class ChannelRegistry {
   }
 
   /**
+   * Get channels that have already expired
+   */
+  getExpired(): WatchChannel[] {
+    const now = Date.now();
+    return this.getAll().filter((ch) => ch.expiration < now);
+  }
+
+  /**
    * Check if channel exists
    */
   has(channelId: string): boolean {
