@@ -12,6 +12,7 @@ import { CalendarClient } from './calendar/client.js';
 import { CalendarSyncService } from './calendar/sync.js';
 import { WatchChannelManager } from './calendar/watcher.js';
 import { WebhookHandler } from './webhook/handler.js';
+import { RenewalService } from './scheduler/renewal.js';
 import { logger } from './utils/logger.js';
 
 /**
@@ -43,6 +44,12 @@ const watchManager = new WatchChannelManager(
   config.webhookUrl,
   config.channelRenewalThresholdMs,
   channelSync
+);
+const renewalService = new RenewalService(
+  channelStore,
+  channelRegistry,
+  calendarClient,
+  config.webhookUrl
 );
 const webhookHandler = new WebhookHandler(
   syncService,
@@ -221,6 +228,50 @@ app.post('/admin/reload-mappings', async (_req, res) => {
 });
 
 /**
+ * Watch channel renewal endpoint
+ * Called by Cloud Scheduler daily to renew expiring channels
+ */
+app.post('/admin/renew-channels', async (_req, res) => {
+  try {
+    logger.info('Watch channel renewal triggered', {
+      operation: '/admin/renew-channels',
+      trigger: 'Cloud Scheduler',
+    });
+
+    // Renew all expiring channels (within 24 hours)
+    const thresholdMs = 86400000; // 24 hours
+    const summary = await renewalService.renewExpiringChannels(thresholdMs, false);
+
+    logger.info('Watch channel renewal completed', {
+      operation: '/admin/renew-channels',
+      context: summary.summary,
+    });
+
+    res.json({
+      status: 'ok',
+      message: `Renewed ${summary.summary.renewed} channels`,
+      ...summary.summary,
+    });
+  } catch (error) {
+    const err = error as Error;
+
+    logger.error('Watch channel renewal failed', {
+      operation: '/admin/renew-channels',
+      error: {
+        message: err.message,
+        stack: err.stack,
+      },
+    });
+
+    res.status(500).json({
+      status: 'error',
+      message: 'Failed to renew channels',
+      details: err.message,
+    });
+  }
+});
+
+/**
  * Webhook endpoint for Google Calendar push notifications
  */
 app.post('/webhook', async (req, res) => {
@@ -271,14 +322,28 @@ async function start(): Promise<void> {
           },
         });
 
-        // Check if any channels were expired and need re-registration
+        // Check for expired channels - log critical error if found
+        // Expired channels should be prevented by Cloud Scheduler daily renewal
+        const expired = channelRegistry.getExpired();
+        if (expired.length > 0) {
+          logger.error('CRITICAL: Expired watch channels detected on startup', {
+            operation: 'start',
+            context: {
+              expiredCount: expired.length,
+              channelIds: expired.map(ch => ch.channelId),
+              action: 'Cloud Scheduler may have failed - manual intervention required',
+              recommendation: 'Check Cloud Scheduler logs and re-deploy service to re-register channels',
+            },
+          });
+        }
+
+        // Info log for channels expiring soon (will be renewed by Cloud Scheduler)
         const expiringSoon = channelRegistry.getExpiringSoon(86400000); // 24 hours
         if (expiringSoon.length > 0) {
-          logger.info('Some channels are expiring soon - will be renewed by scheduled job', {
+          logger.info('Watch channels expiring within 24 hours - will be renewed by Cloud Scheduler', {
             operation: 'start',
             context: {
               expiringCount: expiringSoon.length,
-              channelIds: expiringSoon.map(ch => ch.channelId),
             },
           });
         }
@@ -322,13 +387,30 @@ async function start(): Promise<void> {
     const shutdown = async () => {
       logger.info('Shutting down service', {
         operation: 'shutdown',
+        context: {
+          firestoreEnabled: config.firestoreEnabled,
+        },
       });
 
       clearInterval(refreshInterval);
       clearInterval(renewalInterval);
 
-      // Stop all watch channels
-      await watchManager.stopAllChannels();
+      // Only stop watch channels if Firestore is NOT enabled
+      // When Firestore is enabled (minScale=0), channels are preserved in Firestore
+      // and will be restored on next startup
+      if (!config.firestoreEnabled) {
+        logger.info('Stopping all watch channels (Firestore disabled)', {
+          operation: 'shutdown',
+        });
+        await watchManager.stopAllChannels();
+      } else {
+        logger.info('Preserving watch channels in Firestore (minScale=0 mode)', {
+          operation: 'shutdown',
+          context: {
+            channelCount: channelRegistry.size(),
+          },
+        });
+      }
 
       process.exit(0);
     };
